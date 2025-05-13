@@ -1,13 +1,16 @@
 """
 Tool-related endpoints for the AI Task Copilot API.
 """
-from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
+from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status, Body
+from typing import List, Optional
 
 from app.core.logging import logger
 from app.api.deps import get_current_user
 from app.services.notion import sync_notion_data
 from app.services.github import sync_github_data
 from app.services.slack import sync_slack_data
+from app.tools.rag_tools import semantic_search
+from pydantic import BaseModel
 
 router = APIRouter()
 
@@ -63,4 +66,38 @@ async def trigger_slack_sync(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail="Failed to initiate Slack sync",
+        )
+
+
+class SearchRequest(BaseModel):
+    query: str
+    sources: Optional[List[str]] = None
+    limit: Optional[int] = 5
+
+@router.post("/search")
+async def search(
+    request: SearchRequest = Body(...),
+    user=Depends(get_current_user)
+):
+    """Perform semantic search across data sources (Notion, GitHub, Slack)."""
+    try:
+        source_type = None
+        if request.sources:
+            # Only support one source at a time for now
+            if len(request.sources) == 1:
+                source_type = request.sources[0]
+            else:
+                # If multiple, treat as None (search all)
+                source_type = None
+        results = await semantic_search(
+            query=request.query,
+            limit=request.limit or 5,
+            source_type=source_type
+        )
+        return {"results": results}
+    except Exception as e:
+        logger.error(f"Error in /search endpoint: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Search failed: {str(e)}",
         )

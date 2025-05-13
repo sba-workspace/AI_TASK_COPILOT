@@ -34,9 +34,12 @@ dependencies = [
     "aiohttp (>=3.9.3,<4.0.0)",  # For async HTTP requests
     "torch (>=2.2.1,<3.0.0)",  # For GPU support
     "transformers (>=4.38.2,<5.0.0)",  # Required by HuggingFace models
-    
 ]
 
+[tool.poetry]
+packages = [
+    { include = "app" }
+]
 
 [build-system]
 requires = ["poetry-core>=2.0.0,<3.0.0"]

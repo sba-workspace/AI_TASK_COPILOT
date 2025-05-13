@@ -88,6 +88,7 @@ def get_agent() -> AgentExecutor:
             ("system", SYSTEM_PROMPT),
             MessagesPlaceholder(variable_name="chat_history"),
             ("human", HUMAN_TEMPLATE),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
         ])
         
         # Create memory

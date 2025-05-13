@@ -74,13 +74,3 @@ async def health_check():
 app.include_router(api_router, prefix=settings.API_PREFIX)
 
 
-if __name__ == "__main__":
-    """Run the API server using uvicorn when the script is executed directly."""
-    import uvicorn
-
-    uvicorn.run(
-        "app.main:app",
-        host="0.0.0.0",
-        port=int(os.getenv("PORT", "8000")),
-        reload=settings.DEBUG,
-    )

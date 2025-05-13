@@ -12,7 +12,7 @@ class Settings(BaseSettings):
     """Application settings."""
 
     # FastAPI settings
-    API_PREFIX: str = "/api/v1"
+    API_PREFIX: str = "/api"
     DEBUG: bool = False
     APP_ENV: str = "development"
     

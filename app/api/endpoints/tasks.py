@@ -1,6 +1,7 @@
 """
 Task endpoints for the AI Task Copilot API.
 """
+from typing import Optional
 from fastapi import APIRouter, BackgroundTasks, Depends, HTTPException, status
 from pydantic import BaseModel
 
@@ -27,7 +28,7 @@ class TaskResponse(BaseModel):
     """Task response model."""
     task_id: str
     status: str
-    result: str = None
+    result: Optional[str] = None
 
 
 @router.post("/run-task", response_model=TaskResponse)
@@ -70,7 +71,7 @@ async def run_task(
         )
 
 
-@router.get("/tasks/{task_id}", response_model=TaskResponse)
+@router.get("/{task_id}", response_model=TaskResponse)
 async def get_task_status(
     task_id: str,
     user=Depends(get_current_user)
