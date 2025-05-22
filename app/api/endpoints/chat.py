@@ -2,7 +2,7 @@ from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 from typing import Optional
 
-from app.agent.agent import get_agent
+from app.agent.router import get_router_agent
 from app.core.logging import logger
 
 router = APIRouter()
@@ -15,7 +15,7 @@ class ChatResponse(BaseModel):
     response: str
     conversation_id: str
 
-@router.post("", response_model=ChatResponse)
+@router.post("/", response_model=ChatResponse)
 async def process_chat(request: ChatRequest):
     """
     Process a chat message using the AI agent.
@@ -23,11 +23,11 @@ async def process_chat(request: ChatRequest):
     try:
         logger.info(f"Processing chat message: {request.message[:50]}...")
         
-        # Get the agent
-        agent = get_agent()
+        # Get the router agent
+        router = get_router_agent()
         
-        # Process the message
-        result = agent.invoke({"input": request.message})
+        # Process the message using the appropriate agent
+        result = await router.route_and_execute({"input": request.message})
         
         # Extract the response
         response = result.get("output", "I'm sorry, I couldn't process your request.")

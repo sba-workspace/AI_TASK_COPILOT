@@ -137,8 +137,7 @@ def get_llm(streaming: bool = False, fallback: bool = False) -> BaseChatModel:
             top_p=0.95,
             top_k=40,
             max_output_tokens=2048,
-            streaming=streaming,
-            retry_on_failure=True,
+            disable_streaming=not streaming,
         )
         return llm
     except Exception as e:

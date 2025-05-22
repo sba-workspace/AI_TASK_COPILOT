@@ -11,7 +11,6 @@ from langchain_core.utils.function_calling import convert_to_openai_function
 from langchain_core.runnables import chain
 from langchain_core.output_parsers import StrOutputParser
 from langgraph.graph import StateGraph, END
-from langgraph.checkpoint import MemorySaver
 from langgraph.prebuilt import ToolNode
 
 from app.services.llm import get_llm
@@ -147,7 +146,7 @@ def create_agent():
         workflow.set_entry_point("agent")
         
         # Compile the workflow
-        app = workflow.compile(checkpointer=MemorySaver())
+        app = workflow.compile()
         
         return app
         
@@ -169,9 +168,6 @@ async def execute_graph_agent(input_text: str, chat_history: List[BaseMessage] =
         Agent response
     """
     try:
-        # Create the agent
-        agent = create_agent()
-        
         # Initialize messages
         messages = []
         
@@ -182,18 +178,18 @@ async def execute_graph_agent(input_text: str, chat_history: List[BaseMessage] =
         # Add current input
         messages.append(HumanMessage(content=input_text))
         
-        # Execute the agent
-        result = await agent.ainvoke({"messages": messages})
+        # For now, use a simpler approach while we debug the agent
+        # Get LLM directly
+        llm = get_llm()
         
-        # Get the final messages
-        final_messages = result["messages"]
+        # Call the LLM with the system prompt and user message
+        full_messages = [
+            SystemMessage(content=SYSTEM_PROMPT),
+            HumanMessage(content=input_text)
+        ]
         
-        # Return the last AI message
-        for message in reversed(final_messages):
-            if not isinstance(message, HumanMessage):
-                return message.content
-                
-        return "Unable to get a response from the agent."
+        response = await llm.ainvoke(full_messages)
+        return response.content
         
     except Exception as e:
         logger.error(f"Error executing graph agent: {e}", exc_info=True)

@@ -34,6 +34,8 @@ dependencies = [
     "aiohttp (>=3.9.3,<4.0.0)",  # For async HTTP requests
     "torch (>=2.2.1,<3.0.0)",  # For GPU support
     "transformers (>=4.38.2,<5.0.0)",  # Required by HuggingFace models
+    "email-validator (>=2.2.0,<3.0.0)",
+    "python-multipart (>=0.0.20,<0.0.21)",
 ]
 
 [tool.poetry]

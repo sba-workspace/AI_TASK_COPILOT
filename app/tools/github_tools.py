@@ -1,10 +1,10 @@
 """
 GitHub tools for the LangChain agent.
 """
-from typing import Optional
+from typing import Optional, Dict, Any
 from pydantic import BaseModel, Field
 
-from langchain.tools import StructuredTool
+from langchain.tools import StructuredTool, Tool
 
 from app.services.github import get_issue, get_pull_request, get_file, create_issue
 from app.core.logging import logger
@@ -48,8 +48,20 @@ async def get_github_issue(repo_name: str, issue_number: int) -> str:
         The issue content as text
     """
     try:
-        issue = await get_issue(repo_name, issue_number)
-        return f"Title: {issue.title}\n\n{issue.content}\n\nURL: {issue.url}"
+        issue = await get_issue(repo_name=repo_name, issue_number=issue_number)
+        return f"""Title: {issue.title}
+Number: #{issue.number}
+State: {issue.state}
+Labels: {', '.join(issue.labels) if issue.labels else 'None'}
+Assignees: {', '.join(issue.assignees) if issue.assignees else 'None'}
+
+Description:
+{issue.body}
+
+URL: {issue.html_url}
+Created: {issue.created_at}
+Updated: {issue.updated_at}
+"""
     except Exception as e:
         logger.error(f"Error in get_github_issue tool: {e}", exc_info=True)
         return f"Error getting GitHub issue: {str(e)}"
@@ -68,7 +80,21 @@ async def get_github_pr(repo_name: str, pr_number: int) -> str:
     """
     try:
         pr = await get_pull_request(repo_name, pr_number)
-        return f"Title: {pr.title}\n\n{pr.content}\n\nURL: {pr.url}"
+        return f"""Title: {pr.title}
+Number: #{pr.number}
+State: {pr.state}
+Labels: {', '.join(pr.labels) if pr.labels else 'None'}
+Assignees: {', '.join(pr.assignees) if pr.assignees else 'None'}
+Branch: {pr.branch}
+Merged: {'Yes' if pr.merged else 'No'}
+
+Description:
+{pr.body}
+
+URL: {pr.html_url}
+Created: {pr.created_at}
+Updated: {pr.updated_at}
+"""
     except Exception as e:
         logger.error(f"Error in get_github_pr tool: {e}", exc_info=True)
         return f"Error getting GitHub PR: {str(e)}"
@@ -88,7 +114,14 @@ async def get_github_file(repo_name: str, path: str, ref: Optional[str] = None) 
     """
     try:
         file = await get_file(repo_name, path, ref)
-        return f"File: {file.name}\n\n{file.content}\n\nURL: {file.html_url}"
+        return f"""File: {file.name}
+Path: {file.path}
+Repository: {file.repository}
+URL: {file.html_url}
+
+Content:
+{file.content}
+"""
     except Exception as e:
         logger.error(f"Error in get_github_file tool: {e}", exc_info=True)
         return f"Error getting GitHub file: {str(e)}"
@@ -114,31 +147,31 @@ async def create_github_issue(repo_name: str, title: str, body: str) -> str:
         return f"Error creating GitHub issue: {str(e)}"
 
 
-# Create LangChain tools
+# Create LangChain tools with proper async handling
 get_github_issue_tool = StructuredTool.from_function(
     func=get_github_issue,
     name="get_github_issue",
     description="Get a GitHub issue by repository name and issue number",
-    args_schema=GetGitHubIssueInput,
+    args_schema=GetGitHubIssueInput
 )
 
 get_github_pr_tool = StructuredTool.from_function(
     func=get_github_pr,
     name="get_github_pr",
     description="Get a GitHub pull request by repository name and PR number",
-    args_schema=GetGitHubPRInput,
+    args_schema=GetGitHubPRInput
 )
 
 get_github_file_tool = StructuredTool.from_function(
     func=get_github_file,
     name="get_github_file",
     description="Get a GitHub file's content by repository name and file path",
-    args_schema=GetGitHubFileInput,
+    args_schema=GetGitHubFileInput
 )
 
 create_github_issue_tool = StructuredTool.from_function(
     func=create_github_issue,
     name="create_github_issue",
     description="Create a new GitHub issue with the given title and body",
-    args_schema=CreateGitHubIssueInput,
+    args_schema=CreateGitHubIssueInput
 ) 

@@ -19,6 +19,19 @@ class Settings(BaseSettings):
     # CORS settings
     CORS_ORIGINS: List[str] = ["*"]
     
+    # Frontend URL for redirects
+    FRONTEND_URL: str = "http://localhost:3000"
+    
+    # OAuth settings
+    OAUTH_REDIRECT_URL: Optional[str] = None
+    OAUTH_SCOPES: Dict[str, str] = {
+        "github": "read:user user:email",
+        "google": "openid email profile",
+        
+        "slack": "identity.basic identity.email",
+        
+    }
+    
     # LLM settings
     GOOGLE_API_KEY: str
     
