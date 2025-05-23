@@ -1,11 +1,13 @@
 """
 Dependency injection utilities for FastAPI.
 """
-from fastapi import Depends, HTTPException, status, Header, WebSocket
+from fastapi import Depends, HTTPException, status, Header, WebSocket, Request
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials, OAuth2PasswordBearer
 from jose import JWTError, jwt
-from typing import Optional
+from typing import Optional, Annotated
 from pydantic import BaseModel
+import jwt
+from jwt.exceptions import PyJWTError
 
 from app.core.config import settings
 from app.db.supabase import get_supabase_client
@@ -24,84 +26,67 @@ class User(BaseModel):
     email: str
     
 
-async def get_current_user(token: str = Depends(oauth2_scheme)) -> User:
+async def get_current_user(request: Request) -> User:
     """
-    Get current user from token.
+    Get the current user from the Supabase JWT token.
+    """
+    # Get the Authorization header
+    auth_header = request.headers.get("Authorization")
     
-    Args:
-        token: JWT token
-        
-    Returns:
-        User: Current user
-        
-    Raises:
-        HTTPException: If token is invalid
-    """
-    # Log token information (just first 20 chars for security)
-    if token:
-        logger.debug(f"Token received (first 20 chars): {token[:20]}...")
+    if not auth_header:
+        # Check for cookies (for browser-based requests)
+        auth_cookie = request.cookies.get("sb-access-token")
+        if not auth_cookie:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Not authenticated",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+        token = auth_cookie
     else:
-        logger.warning("No token provided in request")
-        
+        # Extract token from Authorization header
+        scheme, token = auth_header.split()
+        if scheme.lower() != "bearer":
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid authentication scheme",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
+    
     try:
-        # Get Supabase client
-        supabase = get_supabase_client()
+        # Verify the token using Supabase JWT secret
+        # Note: In production, you should validate this against Supabase's JWKS
+        payload = jwt.decode(
+            token, 
+            settings.SUPABASE_JWT_SECRET, 
+            algorithms=["HS256"],
+            options={"verify_signature": settings.VERIFY_JWT}
+        )
         
-        # Verify token with Supabase
-        try:
-            logger.debug("Attempting to verify token with Supabase")
-            user_response = supabase.auth.get_user(token)
-            user_data = user_response.user
-            logger.debug(f"Supabase returned user data type: {type(user_data)}")
+        user_id = payload.get("sub")
+        email = payload.get("email")
+        
+        if user_id is None:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid token payload",
+                headers={"WWW-Authenticate": "Bearer"},
+            )
             
-            # Check if user_data is a dict or already a User object
-            if hasattr(user_data, 'get'):
-                return User(
-                    id=user_data.get("id"),
-                    email=user_data.get("email", ""),
-                )
-            elif isinstance(user_data, dict):
-                return User(
-                    id=user_data.get("id"),
-                    email=user_data.get("email", ""),
-                )
-            else:
-                # Assuming it's some object with id and email attributes
-                return User(
-                    id=getattr(user_data, "id", ""),
-                    email=getattr(user_data, "email", ""),
-                )
-                
-        except Exception as e:
-            # If Supabase client fails, fallback to manual JWT verification
-            logger.warning(f"Supabase auth failed, falling back to JWT verification: {e}")
-            
-            try:
-                logger.debug("Attempting manual JWT decoding")
-                payload = jwt.decode(
-                    token,
-                    settings.SUPABASE_JWT_SECRET,
-                    algorithms=["HS256"],
-                    options={"verify_signature": False}
-                )
-                
-                user_data = {
-                    "id": payload.get("sub"),
-                    "email": payload.get("email", ""),
-                }
-                
-                return User(
-                    id=user_data.get("id"),
-                    email=user_data.get("email", ""),
-                )
-            except Exception as jwt_error:
-                logger.error(f"JWT decode error: {jwt_error}")
-                raise
+        return User(id=user_id, email=email)
+        
+    except PyJWTError as e:
+        logger.error(f"JWT validation error: {e}")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid authentication token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
     except Exception as e:
         logger.error(f"Authentication error: {e}", exc_info=True)
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid authentication credentials",
+            detail="Authentication error",
             headers={"WWW-Authenticate": "Bearer"},
         )
 
@@ -170,3 +155,6 @@ async def get_current_user_ws(token: Optional[str] = None) -> Optional[User]:
     except Exception as e:
         logger.error(f"WebSocket authentication error: {e}", exc_info=True)
         return None
+
+# Type alias for dependency injection
+CurrentUser = Annotated[User, Depends(get_current_user)]

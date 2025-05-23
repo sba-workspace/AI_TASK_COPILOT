@@ -107,6 +107,73 @@ async def update_task_status(
         raise
 
 
+async def update_task(
+    task_id: str,
+    updates: Dict[str, Any]
+) -> Task:
+    """
+    Update a task with arbitrary fields.
+    
+    Args:
+        task_id: ID of the task to update
+        updates: Dictionary of fields to update
+        
+    Returns:
+        The updated task
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Add updated_at timestamp
+        update_data = {
+            **updates,
+            "updated_at": datetime.utcnow().isoformat(),
+        }
+        
+        # Convert any enum values to their string representation
+        for key, value in update_data.items():
+            if hasattr(value, "value"):
+                update_data[key] = value.value
+        
+        # Update task in Supabase
+        response = supabase.table(TASKS_TABLE).update(update_data).eq("id", task_id).execute()
+        
+        if response.data:
+            logger.info(f"Updated task {task_id}")
+            return Task(**response.data[0])
+        else:
+            logger.error(f"Failed to update task: {response.error}")
+            raise Exception(f"Failed to update task: {response.error}")
+    
+    except Exception as e:
+        logger.error(f"Error updating task: {e}", exc_info=True)
+        raise
+
+
+async def delete_task(task_id: str) -> None:
+    """
+    Delete a task from the database.
+    
+    Args:
+        task_id: ID of the task to delete
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Delete task from Supabase
+        response = supabase.table(TASKS_TABLE).delete().eq("id", task_id).execute()
+        
+        if response.error:
+            logger.error(f"Failed to delete task: {response.error}")
+            raise Exception(f"Failed to delete task: {response.error}")
+            
+        logger.info(f"Deleted task {task_id}")
+    
+    except Exception as e:
+        logger.error(f"Error deleting task: {e}", exc_info=True)
+        raise
+
+
 async def get_task(task_id: str) -> Optional[Task]:
     """
     Get a task by ID.
@@ -163,4 +230,36 @@ async def get_user_tasks(user_id: str, limit: int = 10) -> List[Task]:
     
     except Exception as e:
         logger.error(f"Error getting user tasks: {e}", exc_info=True)
+        raise
+
+
+async def get_tasks_by_status(user_id: str, status: TaskStatus) -> List[Task]:
+    """
+    Get a user's tasks by status.
+    
+    Args:
+        user_id: ID of the user
+        status: Task status to filter by
+        
+    Returns:
+        List of tasks with the specified status
+    """
+    try:
+        supabase = get_supabase_client()
+        
+        # Query tasks from Supabase
+        response = supabase.table(TASKS_TABLE)\
+            .select("*")\
+            .eq("user_id", user_id)\
+            .eq("status", status.value)\
+            .order("created_at", desc=True)\
+            .execute()
+        
+        if response.data:
+            return [Task(**task) for task in response.data]
+        else:
+            return []
+    
+    except Exception as e:
+        logger.error(f"Error getting tasks by status: {e}", exc_info=True)
         raise 

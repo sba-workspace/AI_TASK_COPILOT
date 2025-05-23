@@ -43,6 +43,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: str
     SUPABASE_KEY: str
     SUPABASE_JWT_SECRET: str
+    VERIFY_JWT: bool = True
     
     # Notion API
     NOTION_API_KEY: str
@@ -63,9 +64,9 @@ class Settings(BaseSettings):
     # GPU settings
     USE_GPU: bool = False
     
-    @field_validator("USE_GPU", mode="before")
-    def parse_use_gpu(cls, v: Any) -> bool:
-        """Parse USE_GPU value, handling comments in env file."""
+    @field_validator("USE_GPU", "VERIFY_JWT", mode="before")
+    def parse_boolean(cls, v: Any) -> bool:
+        """Parse boolean values, handling comments in env file."""
         if isinstance(v, str):
             # Remove comments and whitespace
             clean_value = v.split('#')[0].strip().lower()

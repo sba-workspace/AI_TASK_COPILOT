@@ -27,6 +27,14 @@ class TaskRequest(BaseModel):
         }
 
 
+class TaskUpdateRequest(BaseModel):
+    """Task update request model."""
+    description: Optional[str] = None
+    status: Optional[str] = None
+    result: Optional[str] = None
+    metadata: Optional[dict] = None
+
+
 class TaskResponse(BaseModel):
     """Task response model."""
     task_id: str
@@ -205,4 +213,148 @@ async def list_user_tasks(
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Failed to list tasks: {str(e)}",
+        )
+
+
+@router.put("/{task_id}", response_model=TaskResponse)
+async def update_task(
+    task_id: str,
+    request: TaskUpdateRequest,
+    user=Depends(get_current_user)
+):
+    """Update a task."""
+    try:
+        logger.info(f"Updating task for user {user.id}: {task_id}")
+        
+        # Check if task belongs to user
+        if not task_id.startswith(f"task_{user.id}_"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to update this task",
+            )
+            
+        # Get task from database
+        task = await task_db.get_task(task_id)
+        
+        if not task:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Task not found",
+            )
+        
+        # Prepare update data
+        update_data = {}
+        if request.description is not None:
+            update_data["description"] = request.description
+        if request.status is not None:
+            try:
+                update_data["status"] = TaskStatus(request.status)
+            except ValueError:
+                raise HTTPException(
+                    status_code=status.HTTP_400_BAD_REQUEST,
+                    detail=f"Invalid status value: {request.status}",
+                )
+        if request.result is not None:
+            update_data["result"] = request.result
+        if request.metadata is not None:
+            update_data["metadata"] = request.metadata
+            
+        # Update task in database
+        updated_task = await task_db.update_task(task_id, update_data)
+        
+        # Convert to response model
+        return TaskResponse(
+            task_id=updated_task.id,
+            status=updated_task.status,
+            result=updated_task.result,
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error updating task: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to update task: {str(e)}",
+        )
+
+
+@router.delete("/{task_id}", status_code=status.HTTP_204_NO_CONTENT)
+async def delete_task(
+    task_id: str,
+    user=Depends(get_current_user)
+):
+    """Delete a task."""
+    try:
+        logger.info(f"Deleting task for user {user.id}: {task_id}")
+        
+        # Check if task belongs to user
+        if not task_id.startswith(f"task_{user.id}_"):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail="You don't have permission to delete this task",
+            )
+            
+        # Get task from database
+        task = await task_db.get_task(task_id)
+        
+        if not task:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Task not found",
+            )
+            
+        # Delete task from database
+        await task_db.delete_task(task_id)
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error deleting task: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to delete task: {str(e)}",
+        )
+
+
+@router.get("/by-status/{status}", response_model=TaskListResponse)
+async def get_tasks_by_status(
+    status: str,
+    user=Depends(get_current_user)
+):
+    """Get tasks by status."""
+    try:
+        logger.info(f"Fetching tasks for user {user.id} with status: {status}")
+        
+        # Validate status
+        try:
+            task_status = TaskStatus(status)
+        except ValueError:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid status value: {status}",
+            )
+            
+        # Get tasks from database
+        tasks_list = await task_db.get_tasks_by_status(user.id, task_status)
+        
+        # Convert to response model
+        return TaskListResponse(
+            tasks=[
+                TaskResponse(
+                    task_id=task.id,
+                    status=task.status,
+                    result=task.result,
+                )
+                for task in tasks_list
+            ]
+        )
+        
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.error(f"Error fetching tasks by status: {e}", exc_info=True)
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to fetch tasks by status: {str(e)}",
         )
