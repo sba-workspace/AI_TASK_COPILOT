@@ -3,6 +3,7 @@ Notion API service for AI Task Copilot.
 """
 from typing import Dict, Any, Optional, List
 from functools import lru_cache
+import asyncio
 
 from notion_client import Client
 from pydantic import BaseModel
@@ -56,9 +57,10 @@ async def get_page(page_id: str) -> NotionPage:
     """
     try:
         client = get_notion_client()
+        loop = asyncio.get_running_loop()
         
         # Retrieve page metadata
-        page = client.pages.retrieve(page_id=page_id)
+        page = await loop.run_in_executor(None, client.pages.retrieve, page_id)
         
         # Extract title
         title = ""
@@ -74,10 +76,10 @@ async def get_page(page_id: str) -> NotionPage:
         last_updated = page.get("last_edited_time", "")
         
         # Retrieve page blocks (content)
-        blocks = client.blocks.children.list(block_id=page_id)
+        blocks_response = await loop.run_in_executor(None, client.blocks.children.list, page_id)
         
         # Extract text content from blocks
-        content = await _extract_blocks_content(blocks.get("results", []))
+        content = await _extract_blocks_content(blocks_response.get("results", []))
         
         return NotionPage(
             id=page_id,
@@ -105,13 +107,15 @@ async def create_page(parent_id: str, title: str, content: str) -> str:
     """
     try:
         client = get_notion_client()
-        
+        loop = asyncio.get_running_loop()
+
         # Check if parent_id is a database or page
         is_database = False
         try:
-            client.databases.retrieve(database_id=parent_id)
+            # Offload the synchronous DB retrieval
+            await loop.run_in_executor(None, client.databases.retrieve, parent_id) # Use actual parent_id
             is_database = True
-        except:
+        except Exception: # Catch specific Notion exceptions if possible, e.g., APIResponseError
             # If not a database, assume it's a page
             pass
         
@@ -144,20 +148,22 @@ async def create_page(parent_id: str, title: str, content: str) -> str:
             }
             parent = {"page_id": parent_id}
         
-        # Create the page
-        response = client.pages.create(
-            parent=parent,
-            properties=properties,
+        # Offload the synchronous page creation
+        response = await loop.run_in_executor(
+            None, 
+            lambda: client.pages.create(parent=parent, properties=properties)
         )
         
         page_id = response["id"]
         
-        # Add content as blocks
-        blocks = _convert_text_to_blocks(content)
-        client.blocks.children.append(
-            block_id=page_id,
-            children=blocks
-        )
+        # Add content as blocks - _convert_text_to_blocks is synchronous
+        # client.blocks.children.append is also synchronous
+        blocks_data = _convert_text_to_blocks(content)
+        if blocks_data: # Only append if there are blocks to add
+            await loop.run_in_executor(
+                None,
+                lambda: client.blocks.children.append(block_id=page_id, children=blocks_data)
+            )
         
         return page_id
     except Exception as e:
@@ -175,64 +181,49 @@ async def _extract_blocks_content(blocks: list) -> str:
     Returns:
         Extracted text content
     """
-    content = []
-    
+    content_parts = []
+    loop = asyncio.get_running_loop()
+
     for block in blocks:
         block_type = block.get("type")
+        text_content = ""
         
         if block_type == "paragraph":
-            text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("paragraph", {}).get("rich_text", [])])
-            if text:
-                content.append(text)
-                
+            text_content = "".join([text_obj.get("plain_text", "") for text_obj in block.get("paragraph", {}).get("rich_text", [])])
         elif block_type == "heading_1":
-            text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("heading_1", {}).get("rich_text", [])])
-            if text:
-                content.append(f"# {text}")
-                
+            text_content = f"# {"".join([text_obj.get("plain_text", "") for text_obj in block.get("heading_1", {}).get("rich_text", [])])}"
         elif block_type == "heading_2":
-            text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("heading_2", {}).get("rich_text", [])])
-            if text:
-                content.append(f"## {text}")
-                
+            text_content = f"## {"".join([text_obj.get("plain_text", "") for text_obj in block.get("heading_2", {}).get("rich_text", [])])}"
         elif block_type == "heading_3":
-            text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("heading_3", {}).get("rich_text", [])])
-            if text:
-                content.append(f"### {text}")
-                
+            text_content = f"### {"".join([text_obj.get("plain_text", "") for text_obj in block.get("heading_3", {}).get("rich_text", [])])}"
         elif block_type == "bulleted_list_item":
-            text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("bulleted_list_item", {}).get("rich_text", [])])
-            if text:
-                content.append(f"• {text}")
-                
+            text_content = f"• {"".join([text_obj.get("plain_text", "") for text_obj in block.get("bulleted_list_item", {}).get("rich_text", [])])}"
         elif block_type == "numbered_list_item":
-            text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("numbered_list_item", {}).get("rich_text", [])])
-            if text:
-                content.append(f"1. {text}")  # Not preserving actual numbers, just listing as 1.
-                
+            text_content = f"1. {"".join([text_obj.get("plain_text", "") for text_obj in block.get("numbered_list_item", {}).get("rich_text", [])])}"
         elif block_type == "to_do":
             checked = block.get("to_do", {}).get("checked", False)
             text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("to_do", {}).get("rich_text", [])])
-            if text:
-                checkbox = "[x]" if checked else "[ ]"
-                content.append(f"{checkbox} {text}")
-                
+            checkbox = "[x]" if checked else "[ ]"
+            text_content = f"{checkbox} {text}"
         elif block_type == "code":
             language = block.get("code", {}).get("language", "")
             text = "".join([text_obj.get("plain_text", "") for text_obj in block.get("code", {}).get("rich_text", [])])
-            if text:
-                content.append(f"```{language}\n{text}\n```")
-                
-        # Handle child blocks recursively if they exist
-        if "has_children" in block and block["has_children"]:
+            text_content = f"```{language}\n{text}\n```"
+        
+        if text_content.strip():
+            content_parts.append(text_content)
+
+        if block.get("has_children"):
             try:
-                child_blocks = get_notion_client().blocks.children.list(block_id=block["id"]).get("results", [])
-                child_content = await _extract_blocks_content(child_blocks)
-                content.append(child_content)
+                client = get_notion_client()
+                child_blocks_response = await loop.run_in_executor(None, client.blocks.children.list, block["id"])
+                child_content = await _extract_blocks_content(child_blocks_response.get("results", []))
+                if child_content.strip():
+                    content_parts.append(child_content)
             except Exception as e:
-                logger.error(f"Error getting child blocks: {e}", exc_info=True)
+                logger.error(f"Error getting child blocks for {block['id']}: {e}", exc_info=True)
     
-    return "\n\n".join(content)
+    return "\n\n".join(filter(None, content_parts))
 
 
 def _convert_text_to_blocks(content: str) -> list:
@@ -353,9 +344,10 @@ async def get_database(database_id: str) -> NotionDatabase:
     """
     try:
         client = get_notion_client()
+        loop = asyncio.get_running_loop()
         
-        # Retrieve database metadata
-        database = client.databases.retrieve(database_id=database_id)
+        # Offload synchronous database retrieval
+        database = await loop.run_in_executor(None, client.databases.retrieve, database_id)
         
         # Extract title
         title = ""
@@ -378,7 +370,7 @@ async def get_database(database_id: str) -> NotionDatabase:
             properties=database.get("properties", {})
         )
     except Exception as e:
-        logger.error(f"Error getting Notion database: {e}", exc_info=True)
+        logger.error(f"Error getting Notion database {database_id}: {e}", exc_info=True)
         raise
 
 
@@ -402,39 +394,35 @@ async def query_database(
     """
     try:
         client = get_notion_client()
+        loop = asyncio.get_running_loop()
         
-        # Prepare query parameters
         query_params = {
             "database_id": database_id,
             "page_size": page_size
         }
-        
         if filter_conditions:
             query_params["filter"] = filter_conditions
-            
         if sorts:
             query_params["sorts"] = sorts
         
-        # Query the database
-        response = client.databases.query(**query_params)
+        # Offload synchronous database query
+        response = await loop.run_in_executor(None, lambda: client.databases.query(**query_params))
         
-        # Process results
         pages = []
-        for page in response.get("results", []):
-            # Extract page data
-            page_id = page["id"]
-            
-            # Get page content
+        for page_summary in response.get("results", []):
+            page_id = page_summary["id"]
             try:
+                # get_page is already refactored
                 page_data = await get_page(page_id)
-                pages.append(page_data)
+                if page_data:
+                    pages.append(page_data)
             except Exception as e:
-                logger.error(f"Error getting page {page_id}: {e}")
+                logger.error(f"Error getting page {page_id} during database query: {e}", exc_info=True)
                 continue
         
         return pages
     except Exception as e:
-        logger.error(f"Error querying Notion database: {e}", exc_info=True)
+        logger.error(f"Error querying Notion database {database_id}: {e}", exc_info=True)
         raise
 
 
@@ -458,25 +446,28 @@ async def create_database(
     """
     try:
         client = get_notion_client()
+        loop = asyncio.get_running_loop()
         
-        # Create database
-        response = client.databases.create(
-            parent={"page_id": parent_page_id},
-            title=[{
+        db_payload = {
+            "parent": {"page_id": parent_page_id},
+            "title": [{
                 "type": "text",
                 "text": {"content": title}
             }],
-            description=[{
+            "description": [{
                 "type": "text",
                 "text": {"content": description}
             }],
-            properties=properties
-        )
+            "properties": properties
+        }
+        
+        # Offload synchronous database creation
+        response = await loop.run_in_executor(None, lambda: client.databases.create(**db_payload))
         
         return NotionDatabase(
             id=response["id"],
-            title=title,
-            description=description,
+            title=title, # Title from input, as response might not have it in the same format
+            description=description, # Description from input
             url=f"https://notion.so/{response['id'].replace('-', '')}",
             properties=response.get("properties", {})
         )
@@ -499,36 +490,53 @@ async def sync_notion_data(user_id: str) -> Dict[str, Any]:
     try:
         logger.info(f"Starting Notion data sync for user {user_id}")
         client = get_notion_client()
+        loop = asyncio.get_running_loop()
         
         # Search for pages the integration has access to
-        response = client.search(filter={"property": "object", "value": "page"})
-        pages = response.get("results", [])
+        search_params = {"filter": {"property": "object", "value": "page"}}
+        response = await loop.run_in_executor(None, lambda: client.search(**search_params))
+        pages_summary = response.get("results", [])
         
+        logger.info(f"Found {len(pages_summary)} pages/databases summary records via search.")
+
         # Get details for each page
-        synced_pages = []
+        synced_pages_data = []
         errors = []
         
-        for page in pages:
+        for page_summary in pages_summary:
             try:
-                page_id = page["id"]
+                page_id = page_summary["id"]
                 page_data = await get_page(page_id)
-                synced_pages.append(page_data)
-                logger.debug(f"Synced Notion page: {page_data.title}")
+                if page_data:
+                    synced_pages_data.append(page_data)
+                    logger.debug(f"Successfully fetched Notion page: {page_data.title}")
+                else:
+                    logger.warning(f"Could not retrieve data for page {page_id}")
+                    errors.append({"page_id": page_id, "error": "Failed to retrieve page data (get_page returned None)"})
             except Exception as e:
-                logger.error(f"Error syncing Notion page {page['id']}: {e}")
-                errors.append({"page_id": page["id"], "error": str(e)})
+                logger.error(f"Error processing Notion page_summary {page_summary.get('id', 'UnknownID')}: {e}", exc_info=True)
+                errors.append({"page_id": page_summary.get('id', 'UnknownID'), "error": str(e)})
         
         # TODO: Add code to embed and store the synced pages in a vector store
         # This would typically call a function like:
-        # await store_notion_data(user_id, synced_pages)
+        # await store_notion_data_in_weaviate(user_id, synced_pages_data) # Assuming such function exists
         
+        logger.info(f"Finished Notion data sync for user {user_id}. Pages processed: {len(synced_pages_data)}, Errors: {len(errors)}")
         return {
-            "status": "success",
+            "status": "success" if not errors else "partial_success",
             "user_id": user_id,
-            "pages_synced": len(synced_pages),
-            "errors": len(errors),
+            "pages_synced_count": len(synced_pages_data),
+            "errors_count": len(errors),
             "error_details": errors if errors else None
         }
     except Exception as e:
-        logger.error(f"Error syncing Notion data for user {user_id}: {e}", exc_info=True)
-        raise 
+        logger.error(f"Critical error during Notion data sync for user {user_id}: {e}", exc_info=True)
+        # It might be better to return a distinct error status or re-raise for a global error handler
+        return {
+            "status": "failed",
+            "user_id": user_id,
+            "message": str(e),
+            "pages_synced_count": 0,
+            "errors_count": 1, # Indicates the main sync function failed
+            "error_details": [{ "error": str(e) }]
+        } 
