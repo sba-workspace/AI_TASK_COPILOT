@@ -7,7 +7,7 @@ services:
       - "8000:8000"
     environment:
       - GOOGLE_API_KEY=${GOOGLE_API_KEY}
-      - WEAVIATE_URL=http://weaviate:8080
+      - WEAVIATE_URL=voywxlqmqba6bujxhv3ga.c0.asia-southeast1.gcp.weaviate.cloud
       - WEAVIATE_API_KEY=${WEAVIATE_API_KEY}
       - SUPABASE_URL=${SUPABASE_URL}
       - SUPABASE_KEY=${SUPABASE_KEY}

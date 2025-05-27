@@ -60,6 +60,7 @@ async def get_current_user(request: Request) -> User:
             token, 
             settings.SUPABASE_JWT_SECRET, 
             algorithms=["HS256"],
+            audience="authenticated",
             options={"verify_signature": settings.VERIFY_JWT}
         )
         

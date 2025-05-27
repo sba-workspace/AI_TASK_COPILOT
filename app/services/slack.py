@@ -54,92 +54,94 @@ def get_slack_client() -> WebClient:
 
 
 async def get_channel_messages(
-    channel_id: str, 
-    limit: int = 10, 
+    channel_id: str,
+    limit: int = 10,
     oldest: Optional[str] = None,
     latest: Optional[str] = None
 ) -> List[SlackMessage]:
-    """
-    Get messages from a Slack channel.
-    
-    Args:
-        channel_id: The ID of the channel
-        limit: Maximum number of messages to return
-        oldest: Timestamp of the oldest message to include
-        latest: Timestamp of the latest message to include
-        
-    Returns:
-        List of SlackMessage objects
-    """
+    """Retrieve and process messages from a Slack channel with robust error handling."""
+    logger.debug(f"Starting message retrieval for channel: {channel_id}")
+    client = get_slack_client()
+    messages = []
+
     try:
-        client = get_slack_client()
-        
-        # Get channel info for the name
-        channel_info = client.conversations_info(channel=channel_id)
-        channel_name = channel_info["channel"]["name"]
-        
-        # Get messages
-        response = client.conversations_history(
+        # Get channel metadata with enhanced validation
+        channel_info = client.conversations_info(channel=channel_id).data
+        if not channel_info.get('ok'):
+            logger.error(f"Channel info request failed for {channel_id}: {channel_info.get('error')}")
+            return []
+
+        channel_data = channel_info.get('channel', {})
+        if not isinstance(channel_data, dict):
+            logger.error(f"Invalid channel data format for {channel_id}")
+            return []
+
+        channel_name = channel_data.get('name', 'unknown-channel')
+        logger.debug(f"Processing channel: {channel_name}")
+
+        # Retrieve message history with pagination support
+        history_data = client.conversations_history(
             channel=channel_id,
             limit=limit,
             oldest=oldest,
             latest=latest
-        )
-        
-        messages = []
-        for msg in response["messages"]:
-            # Skip bot messages if they don't have text
-            if "subtype" in msg and msg["subtype"] == "bot_message" and not msg.get("text"):
-                continue
-                
-            # Get user display name when possible
-            user_display = msg.get("user", "unknown")
-            if "user" in msg and msg["user"]:
-                try:
-                    user_info = client.users_info(user=msg["user"])
-                    user_display = user_info["user"]["real_name"] or user_info["user"]["name"]
-                except:
-                    # Fall back to user ID if we can't get the name
-                    pass
-            
-            # Get message permalink if possible
-            permalink = None
+        ).data
+
+        if not history_data.get('ok'):
+            logger.error(f"History request failed for {channel_name}: {history_data.get('error')}")
+            return []
+
+        raw_messages = history_data.get('messages', [])
+        logger.debug(f"Found {len(raw_messages)} raw messages in {channel_name}")
+
+        # Process messages with comprehensive validation
+        for idx, msg in enumerate(raw_messages):
             try:
-                if "ts" in msg:
-                    permalink_resp = client.chat_getPermalink(
-                        channel=channel_id,
-                        message_ts=msg["ts"]
-                    )
-                    permalink = permalink_resp.get("permalink")
-            except:
-                # Permalinks are not essential, so continue if we can't get one
-                pass
+                if not isinstance(msg, dict):
+                    logger.warning(f"Skipping invalid message format at index {idx}")
+                    continue
+
+                # User resolution with fallback
+                user_id = msg.get('user', 'unknown-user')
+                user_display = await resolve_user_display(client, user_id)
+
+                # Message metadata
+                message_id = msg.get('ts', f"no-ts-{idx}")
+                message_text = msg.get('text', '').strip()
                 
-            # Get reactions
-            reactions = []
-            if "reactions" in msg:
-                for reaction in msg["reactions"]:
-                    reactions.append(f":{reaction['name']}:")
-            
-            messages.append(SlackMessage(
-                id=msg["ts"],
-                text=msg.get("text", ""),
-                user=user_display,
-                channel_id=channel_id,
-                channel_name=channel_name,
-                timestamp=msg["ts"],
-                permalink=permalink,
-                thread_ts=msg.get("thread_ts"),
-                reactions=reactions
-            ))
-        
+                if not message_text:
+                    logger.debug(f"Skipping empty message {message_id}")
+                    continue
+
+                # Permalink retrieval
+                permalink = await get_message_permalink(client, channel_id, message_id)
+
+                # Reaction processing
+                reactions = process_reactions(msg.get('reactions', []))
+
+                messages.append(SlackMessage(
+                    id=message_id,
+                    text=message_text,
+                    user=user_display,
+                    channel_id=channel_id,
+                    channel_name=channel_name,
+                    timestamp=message_id,
+                    permalink=permalink,
+                    thread_ts=msg.get('thread_ts'),
+                    reactions=reactions
+                ))
+
+            except Exception as msg_error:
+                logger.warning(f"Error processing message {idx}: {str(msg_error)}")
+
+        logger.info(f"Successfully processed {len(messages)}/{len(raw_messages)} messages from {channel_name}")
         return messages
-        
-    except SlackApiError as e:
-        logger.error(f"Slack API error: {e}", exc_info=True)
+
+    except SlackApiError as api_error:
+        logger.error(f"Slack API failure: {api_error.response['error']}")
         raise
-    except Exception as e:
-        logger.error(f"Error getting Slack messages: {e}", exc_info=True)
+    except Exception as general_error:
+        logger.error(f"Unexpected error: {str(general_error)}", exc_info=True)
         raise
 
 
@@ -401,72 +403,112 @@ async def list_channels(limit: int = 100, exclude_archived: bool = True) -> List
         raise
 
 
-async def sync_slack_data(user_id: str, channel_ids: List[str] = None):
-    """
-    Sync Slack data to the vector store.
+async def sync_slack_data(user_id: str, channel_ids: Optional[List[str]] = None):
+    """Orchestrate Slack data synchronization with fault-tolerant processing."""
+    logger.info(f"Initiating Slack sync for user: {user_id}")
+    client = get_slack_client()
     
-    Args:
-        user_id: The ID of the user whose data to sync
-        channel_ids: Optional list of channel IDs to sync
-    """
     try:
-        logger.info(f"Starting Slack sync for user {user_id}")
-        
-        client = get_slack_client()
         weaviate_client = get_weaviate_client()
-        
-        # If no channels specified, get all channels the bot has access to
-        if not channel_ids:
-            try:
-                response = client.conversations_list(types="public_channel,private_channel")
-                channel_ids = [c["id"] for c in response["channels"]]
-            except SlackApiError as e:
-                logger.error(f"Error listing channels: {e}", exc_info=True)
-                raise
-        
+    except Exception as weaviate_error:
+        logger.warning("Weaviate unavailable: Vector storage disabled")
+        weaviate_client = None
+
+    try:
+        channel_ids = channel_ids or await fetch_accessible_channels(client)
+        logger.debug(f"Processing {len(channel_ids)} channels")
+
+        success_count = 0
         for channel_id in channel_ids:
             try:
-                # Get channel info
-                channel_info = client.conversations_info(channel=channel_id)["channel"]
-                channel_name = channel_info["name"]
-                
+                channel_info = client.conversations_info(channel=channel_id).data
+                if not channel_info.get('ok'):
+                    logger.warning(f"Skipping channel {channel_id}: {channel_info.get('error')}")
+                    continue
+
+                channel_name = channel_info['channel'].get('name', 'unknown-channel')
                 logger.info(f"Syncing channel: {channel_name}")
+
+                messages = await get_channel_messages(channel_id, limit=1000)
+                if not messages:
+                    logger.debug(f"No messages found in {channel_name}")
+                    continue
+
+                if weaviate_client:
+                    await store_messages_in_weaviate(weaviate_client, messages, user_id)
                 
-                # Get messages
-                messages = await get_channel_messages(channel_id, limit=1000)  # Adjust limit as needed
-                
-                for msg in messages:
-                    try:
-                        # Embed the message content
-                        embedding = (await embed_texts([msg.text]))[0]
-                        
-                        # Store in Weaviate
-                        weaviate_client.data_object.create(
-                            class_name="SlackMessage",
-                            data_object={
-                                "channel": msg.channel_id,
-                                "content": msg.text,
-                                "sender": msg.user,
-                                "timestamp": msg.timestamp,
-                                "userId": user_id,
-                            },
-                            vector=embedding
-                        )
-                        
-                        logger.debug(f"Synced message {msg.id} from {channel_name}")
-                        
-                    except Exception as e:
-                        logger.error(f"Error syncing message {msg.id}: {e}", exc_info=True)
-                        continue
-                
-                logger.info(f"Completed sync for channel: {channel_name}")
-                
-            except Exception as e:
-                logger.error(f"Error syncing channel {channel_id}: {e}", exc_info=True)
+                success_count += 1
+                logger.debug(f"Completed sync for {channel_name}")
+
+            except Exception as channel_error:
+                logger.warning(f"Channel {channel_id} sync failed: {str(channel_error)}")
                 continue
-        
-        logger.info(f"Completed Slack sync for user {user_id}")
-        
-    except Exception as e:
-        logger.error(f"Error in Slack sync for user {user_id}: {e}", exc_info=True)
-        raise 
+
+        logger.info(f"Sync complete: {success_count}/{len(channel_ids)} channels processed")
+
+    except SlackApiError as api_error:
+        logger.error(f"Slack API failure: {api_error.response['error']}")
+        raise
+    except Exception as general_error:
+        logger.error(f"Critical sync failure: {str(general_error)}", exc_info=True)
+        raise
+
+
+# Helper functions
+async def resolve_user_display(client: WebClient, user_id: str) -> str:
+    """Resolve user display name with caching and fallback."""
+    try:
+        user_info = client.users_info(user=user_id).data
+        if user_info.get('ok'):
+            user = user_info.get('user', {})
+            return user.get('real_name') or user.get('name', user_id)
+    except Exception as user_error:
+        logger.debug(f"User resolution failed: {str(user_error)}")
+    return user_id
+
+async def get_message_permalink(client: WebClient, channel_id: str, ts: str) -> Optional[str]:
+    """Retrieve message permalink with error suppression."""
+    try:
+        permalink_data = client.chat_getPermalink(channel=channel_id, message_ts=ts).data
+        return permalink_data.get('permalink') if permalink_data.get('ok') else None
+    except Exception:
+        return None
+
+def process_reactions(raw_reactions: List[dict]) -> List[str]:
+    """Normalize reaction data."""
+    return [
+        f":{r['name']}:" 
+        for r in raw_reactions 
+        if isinstance(r, dict) and 'name' in r
+    ]
+
+async def fetch_accessible_channels(client: WebClient) -> List[str]:
+    """Retrieve list of accessible channels with error handling."""
+    try:
+        response = client.conversations_list(types="public_channel,private_channel").data
+        return [c['id'] for c in response.get('channels', [])] if response.get('ok') else []
+    except Exception as channel_error:
+        logger.error(f"Channel listing failed: {str(channel_error)}")
+        return []
+
+async def store_messages_in_weaviate(client, messages: List[SlackMessage], user_id: str):
+    """Batch store messages in Weaviate with error tracking."""
+    success = 0
+    for msg in messages:
+        try:
+            embedding = (await embed_texts([msg.text]))[0]
+            client.data_object.create(
+                class_name="SlackMessage",
+                data_object={
+                    "channel": msg.channel_id,
+                    "content": msg.text,
+                    "sender": msg.user,
+                    "timestamp": msg.timestamp,
+                    "userId": user_id,
+                },
+                vector=embedding
+            )
+            success += 1
+        except Exception as store_error:
+            logger.debug(f"Storage failed for {msg.id}: {str(store_error)}")
+    logger.info(f"Stored {success}/{len(messages)} messages in Weaviate") 
