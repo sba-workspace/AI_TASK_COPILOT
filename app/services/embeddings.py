@@ -131,306 +131,176 @@ class CachedEmbeddings:
         # Generate embeddings for uncached texts
         if to_embed:
             try:
-                new_embeddings = self.embeddings.embed_documents(to_embed)
+                # Run the synchronous embedding generation in a thread pool executor
+                loop = asyncio.get_running_loop()
+                new_embeddings = await loop.run_in_executor(
+                    None,  # Uses the default ThreadPoolExecutor
+                    self.embeddings.embed_documents,
+                    to_embed
+                )
                 
-                # Save new embeddings to cache (without waiting)
-                cache_tasks = [
+                # Save new embeddings to cache
+                save_tasks = [
                     self._save_to_cache(text, embedding)
                     for text, embedding in zip(to_embed, new_embeddings)
                 ]
-                asyncio.create_task(asyncio.gather(*cache_tasks, return_exceptions=True))
+                await asyncio.gather(*save_tasks)
                 
                 # Update results
-                for idx, embedding in zip(to_embed_indices, new_embeddings):
-                    results[idx] = embedding
-                    
+                for i, embedding_idx in enumerate(to_embed_indices):
+                    results[embedding_idx] = new_embeddings[i]
+
             except Exception as e:
-                logger.error(f"Error generating embeddings: {e}")
-                raise
+                logger.error(f"Error generating or caching embeddings for a batch: {e}", exc_info=True)
+                # Decide how to handle partial failures. For now, we'll let the Nones propagate
+                # and they will be filtered out at the end.
+                # Alternatively, re-raise the exception if any failure should stop the whole process:
+                # raise
         
-        return results
+        # Filter out any None results that might occur if embedding failed for some texts
+        final_results = [res for res in results if res is not None]
+        if len(final_results) != len(texts):
+            logger.warning(f"Could not generate embeddings for {len(texts) - len(final_results)} texts.")
+        return final_results
+
+# End of CachedEmbeddings class
 
 
-@lru_cache(maxsize=1)
+@lru_cache()
 def get_device() -> str:
     """Get the appropriate device (CPU/CUDA) for the embedding model."""
-    if torch.cuda.is_available() and getattr(settings, 'USE_GPU', False):
-        logger.info("Using CUDA device for embeddings")
+    if torch.cuda.is_available() and settings.USE_GPU:
+        logger.info("Using CUDA device for embeddings.")
         return "cuda"
-    logger.info("Using CPU device for embeddings")
+    logger.info("Using CPU device for embeddings.")
     return "cpu"
 
 
-# Global variable to store the embeddings instance
-_embeddings_instance = None
-
-
-def _create_embeddings_instance(fallback_level: int = 0) -> Embeddings:
-    """
-    Create embeddings model instance.
-    
-    Args:
-        fallback_level: Level of fallback (0=primary, 1=cohere, 2=mini)
-        
-    Returns:
-        Embedding model instance
-    """
-    try:
-        if fallback_level == 0:
-            # Try primary model - use a valid model name
-            logger.info("Loading primary embedding model: sentence-transformers/all-mpnet-base-v2")
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=DeprecationWarning)
-                base_embeddings = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-mpnet-base-v2",
-                    model_kwargs={"device": get_device()},
-                    encode_kwargs={"normalize_embeddings": True}
-                )
-        
-        elif fallback_level == 1:
-            # Try Cohere if available
-            if hasattr(settings, 'COHERE_API_KEY') and settings.COHERE_API_KEY:
-                logger.info("Loading Cohere embedding model")
-                base_embeddings = CohereEmbeddings(
-                    cohere_api_key=settings.COHERE_API_KEY,
-                    model="embed-english-v3.0"
-                )
-            else:
-                logger.warning("Cohere API key not available, skipping to next fallback")
-                return _create_embeddings_instance(fallback_level + 1)
-        
-        else:
-            # Final fallback to a smaller local model
-            logger.info("Loading fallback embedding model: sentence-transformers/all-MiniLM-L6-v2")
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", category=DeprecationWarning)
-                base_embeddings = HuggingFaceEmbeddings(
-                    model_name="sentence-transformers/all-MiniLM-L6-v2",
-                    model_kwargs={"device": get_device()},
-                    encode_kwargs={"normalize_embeddings": True}
-                )
-        
-        # Test the embedding model
-        try:
-            test_embedding = base_embeddings.embed_query("test")
-            if not test_embedding or len(test_embedding) == 0:
-                raise ValueError("Embedding model returned empty result")
-            logger.info(f"Embedding model test successful, dimension: {len(test_embedding)}")
-        except Exception as e:
-            logger.error(f"Embedding model test failed: {e}")
-            if fallback_level < 2:
-                return _create_embeddings_instance(fallback_level + 1)
-            raise
-        
-        return base_embeddings
-        
-    except Exception as e:
-        logger.error(f"Failed to create embedding model at fallback level {fallback_level}: {e}")
-        if fallback_level < 2:
-            return _create_embeddings_instance(fallback_level + 1)
-        raise
-
-
 @retry(
-    stop=stop_after_attempt(3),
-    wait=wait_exponential(multiplier=1, min=2, max=8),
-    retry=retry_if_exception_type((OSError, RuntimeError, ConnectionError))
+    stop=stop_after_attempt(settings.EMBEDDING_RETRY_ATTEMPTS),
+    wait=wait_exponential(
+        multiplier=settings.EMBEDDING_RETRY_MULTIPLIER,
+        min=settings.EMBEDDING_RETRY_MIN_WAIT,
+        max=settings.EMBEDDING_RETRY_MAX_WAIT
+    ),
+    retry=retry_if_exception_type((OSError, RuntimeError))
 )
-def get_embeddings() -> CachedEmbeddings:
+@lru_cache()
+def get_embeddings(use_fallback: bool = False) -> Embeddings:
     """
-    Get or create embeddings model instance with caching.
-    Uses global variable to ensure only one model is loaded.
-    
-    Returns:
-        Cached embedding model instance
+    Create and return an embeddings model instance with caching.
+    Uses lru_cache to ensure only one model is loaded.
+    Prioritizes Nomic, falls back to Cohere, then to a local SentenceTransformer.
     """
-    global _embeddings_instance
+    logger.info(f"Attempting to load embeddings model. Fallback: {use_fallback}")
+    model_kwargs = {"device": get_device()}
     
-    if _embeddings_instance is None:
-        logger.info("Initializing embeddings service")
-        try:
-            base_embeddings = _create_embeddings_instance()
-            _embeddings_instance = CachedEmbeddings(base_embeddings)
-            logger.info("Embeddings service initialized successfully")
-        except Exception as e:
-            logger.error(f"Failed to initialize embeddings service: {e}", exc_info=True)
-            raise
-    
-    return _embeddings_instance
+    try:
+        if not use_fallback and settings.PRIMARY_EMBEDDING_MODEL_NAME:
+            logger.info(f"Loading primary embedding model: {settings.PRIMARY_EMBEDDING_MODEL_NAME}")
+            if settings.PRIMARY_EMBEDDING_MODEL_NAME.startswith("nomic-ai"):
+                 base_embeddings = HuggingFaceEmbeddings(
+                    model_name=settings.PRIMARY_EMBEDDING_MODEL_NAME,
+                    model_kwargs=model_kwargs,
+                    encode_kwargs={'normalize_embeddings': True} 
+                )
+            else: # Assuming other HuggingFace models
+                base_embeddings = HuggingFaceEmbeddings(
+                    model_name=settings.PRIMARY_EMBEDDING_MODEL_NAME,
+                    model_kwargs=model_kwargs
+                )
+            logger.info(f"Primary model {settings.PRIMARY_EMBEDDING_MODEL_NAME} loaded successfully.")
+        elif settings.COHERE_API_KEY and (use_fallback or not settings.PRIMARY_EMBEDDING_MODEL_NAME):
+            logger.info("Loading Cohere embeddings model as fallback or primary.")
+            base_embeddings = CohereEmbeddings(cohere_api_key=settings.COHERE_API_KEY)
+            logger.info("Cohere model loaded successfully.")
+        elif settings.FALLBACK_EMBEDDING_MODEL_NAME:
+            logger.info(f"Loading local fallback HuggingFace model: {settings.FALLBACK_EMBEDDING_MODEL_NAME}")
+            base_embeddings = HuggingFaceEmbeddings(
+                model_name=settings.FALLBACK_EMBEDDING_MODEL_NAME,
+                model_kwargs=model_kwargs,
+                encode_kwargs={'normalize_embeddings': True} if "all-MiniLM" in settings.FALLBACK_EMBEDDING_MODEL_NAME else {}
+            )
+            logger.info(f"Local fallback model {settings.FALLBACK_EMBEDDING_MODEL_NAME} loaded successfully.")
+        else:
+            logger.error("No embedding models configured or API keys provided.")
+            raise ValueError("Embedding model configuration error.")
+
+        return CachedEmbeddings(base_embeddings)
+
+    except Exception as e:
+        logger.error(f"Failed to load embedding model (fallback={use_fallback}): {e}", exc_info=True)
+        if not use_fallback: # If primary failed, try with full fallback logic
+            logger.warning("Attempting to load embeddings with full fallback sequence.")
+            return get_embeddings(use_fallback=True)
+        raise # If already in fallback mode and failed, raise the exception
 
 
 async def embed_texts(
     texts: List[str],
     batch_size: int = 32,
-    show_progress: bool = False
 ) -> List[List[float]]:
     """
     Embed a list of texts using the embedding model.
-    Includes batching and progress tracking.
-    
-    Args:
-        texts: List of text strings to embed
-        batch_size: Size of batches for processing
-        show_progress: Whether to show progress bar
-        
-    Returns:
-        List of embedding vectors
     """
     if not texts:
         return []
     
-    # Filter out empty texts
-    non_empty_texts = [(i, text) for i, text in enumerate(texts) if text and text.strip()]
-    if not non_empty_texts:
-        logger.warning("All texts are empty, returning empty embeddings")
-        return [[0.0] * 384] * len(texts)  # Return dummy embeddings
-    
-    try:
-        embeddings = get_embeddings()
-        all_embeddings = [None] * len(texts)
-        
-        # Process non-empty texts
-        texts_to_embed = [text for _, text in non_empty_texts]
-        
-        # Process in batches
-        batch_embeddings = []
-        for i in range(0, len(texts_to_embed), batch_size):
-            batch = texts_to_embed[i:i + batch_size]
-            try:
-                batch_result = await embeddings.embed_documents(batch)
-                batch_embeddings.extend(batch_result)
-                
-                if show_progress:
-                    logger.info(f"Embedded {i + len(batch)}/{len(texts_to_embed)} texts")
-                    
-            except Exception as e:
-                logger.error(f"Error in batch {i//batch_size + 1}: {e}")
-                # Add dummy embeddings for failed batch
-                dummy_embedding = [0.0] * 384
-                batch_embeddings.extend([dummy_embedding] * len(batch))
-        
-        # Map embeddings back to original positions
-        for (original_idx, _), embedding in zip(non_empty_texts, batch_embeddings):
-            all_embeddings[original_idx] = embedding
-        
-        # Fill in dummy embeddings for empty texts
-        dummy_embedding = [0.0] * 384
-        for i, embedding in enumerate(all_embeddings):
-            if embedding is None:
-                all_embeddings[i] = dummy_embedding
-        
-        return all_embeddings
-        
-    except Exception as e:
-        logger.error(f"Error embedding texts: {e}", exc_info=True)
-        # Return dummy embeddings instead of failing
-        dummy_embedding = [0.0] * 384
-        return [dummy_embedding] * len(texts)
+    embeddings_service = get_embeddings()
+    all_embeddings: List[List[float]] = []
+
+    for i in range(0, len(texts), batch_size):
+        batch = texts[i:i + batch_size]
+        try:
+            batch_embeddings = await embeddings_service.embed_documents(batch)
+            all_embeddings.extend(batch_embeddings)
+            logger.debug(f"Embedded batch {i//batch_size + 1}/{(len(texts) + batch_size - 1)//batch_size}")
+        except Exception as e:
+            logger.error(f"Error embedding batch (start index {i}): {e}", exc_info=True)
+            # Add None for failed embeddings in this batch to maintain order if desired,
+            # or handle more gracefully. For now, extend with empty lists or skip.
+            all_embeddings.extend([[] for _ in batch]) # Placeholder for failed batch items
+
+    # Filter out empty lists if they were used as placeholders for errors
+    return [emb for emb in all_embeddings if emb]
 
 
 async def embed_query(
     query: str,
-    retry_count: int = 3
 ) -> List[float]:
     """
     Embed a single query text using the embedding model.
-    Includes retry logic for reliability.
-    
-    Args:
-        query: The query text to embed
-        retry_count: Number of retries on failure
-        
-    Returns:
-        Embedding vector
     """
-    if not query or not query.strip():
-        logger.warning("Empty query provided, returning dummy embedding")
-        return [0.0] * 384
+    if not query:
+        raise ValueError("Query text cannot be empty")
     
-    for attempt in range(retry_count):
-        try:
-            embeddings = get_embeddings()
-            return await embeddings.embed_query(query.strip())
-        except Exception as e:
-            if attempt == retry_count - 1:
-                logger.error(f"Error embedding query after {retry_count} attempts: {e}")
-                # Return dummy embedding instead of raising
-                return [0.0] * 384
-            logger.warning(f"Retry {attempt + 1}/{retry_count} after error: {e}")
-            await asyncio.sleep(2 ** attempt)  # Exponential backoff
+    embeddings_service = get_embeddings()
+    try:
+        return await embeddings_service.embed_query(query)
+    except Exception as e:
+        logger.error(f"Error embedding query: {e}", exc_info=True)
+        raise
 
 
 async def get_embedding_stats() -> dict:
     """
     Get statistics about the embedding cache and model.
-    
-    Returns:
-        Dictionary with statistics
     """
     try:
-        # Get cache stats
-        try:
-            cache_keys = await redis_client.keys("embeddings_cache:*")
-            cache_size = len(cache_keys)
-        except Exception as e:
-            logger.warning(f"Could not get cache stats: {e}")
-            cache_size = -1
+        cache_keys = await redis_client.keys(f"{CachedEmbeddings(None).namespace}*") # type: ignore
+        cache_size = len(cache_keys)
         
-        # Get model info
-        try:
-            embeddings = get_embeddings()
-            base_embeddings = embeddings.embeddings
-            
-            model_name = "unknown"
-            if hasattr(base_embeddings, 'model_name'):
-                model_name = base_embeddings.model_name
-            elif hasattr(base_embeddings, 'model'):
-                model_name = str(base_embeddings.model)
-                
-            is_cohere = isinstance(base_embeddings, CohereEmbeddings)
-        except Exception as e:
-            logger.warning(f"Could not get model info: {e}")
-            model_name = "error"
-            is_cohere = False
-        
-        # Get device info
-        device = get_device()
-        
+        # Determine current model without re-initializing if possible (tricky with lru_cache)
+        # This is a simplified representation; real model name might need deeper inspection
+        # or exposing model_name from CachedEmbeddings.
+        current_model_name = "Primary/Fallback (details depend on settings)"
+        device_info = get_device()
+
         return {
             "cache_size": cache_size,
-            "model_name": model_name,
-            "device": device,
-            "using_cohere": is_cohere,
-            "status": "healthy"
+            "approximated_model_name": current_model_name,
+            "device": device_info,
         }
     except Exception as e:
         logger.error(f"Error getting embedding stats: {e}", exc_info=True)
-        return {
-            "error": str(e),
-            "status": "error"
-        }
-
-
-async def clear_embedding_cache() -> bool:
-    """
-    Clear the embedding cache.
-    
-    Returns:
-        True if successful, False otherwise
-    """
-    try:
-        cache_keys = await redis_client.keys("embeddings_cache:*")
-        if cache_keys:
-            await redis_client.delete(*cache_keys)
-            logger.info(f"Cleared {len(cache_keys)} items from embedding cache")
-        return True
-    except Exception as e:
-        logger.error(f"Error clearing embedding cache: {e}")
-        return False
-
-
-def reset_embeddings_instance():
-    """Reset the global embeddings instance (useful for testing)."""
-    global _embeddings_instance
-    _embeddings_instance = None
-    logger.info("Embeddings instance reset")
+        return {"error": str(e)}

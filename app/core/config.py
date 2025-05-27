@@ -63,6 +63,16 @@ class Settings(BaseSettings):
     
     # GPU settings
     USE_GPU: bool = False
+
+    # Embedding retry settings
+    EMBEDDING_RETRY_ATTEMPTS: int = 3
+    EMBEDDING_RETRY_MULTIPLIER: int = 1
+    EMBEDDING_RETRY_MIN_WAIT: int = 2  # seconds
+    EMBEDDING_RETRY_MAX_WAIT: int = 10 # seconds
+
+    # Primary and Fallback Embedding Model Names
+    PRIMARY_EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-mpnet-base-v2"
+    FALLBACK_EMBEDDING_MODEL_NAME: str = "sentence-transformers/all-MiniLM-L6-v2"
     
     @field_validator("USE_GPU", "VERIFY_JWT", mode="before")
     def parse_boolean(cls, v: Any) -> bool:
